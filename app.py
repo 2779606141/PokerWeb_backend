@@ -1,9 +1,8 @@
 import base64
 import io
 import tempfile
-from threading import Thread
 
-from flask import Flask, jsonify, request, send_file, Response, after_this_request
+from flask import Flask, jsonify, request, send_file, Response, after_this_request,request
 from flask_cors import CORS
 import random  # 导入random模块，用于生成随机数
 from QtFusion.config import QF_Config
@@ -103,30 +102,43 @@ def detect_video():
     # 如果用户没有选择文件，浏览器可能会提交一个没有文件名的空部分
     if file.filename == '':
         return 'No selected file', 400
+
+    temp_dir = 'temp'
     # 创建临时文件来保存上传的视频和输出视频
-    input_temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-    output_temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4')
-    # output_path = 'output_video.mp4'
+    input_temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4',dir=temp_dir)
+    output_temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp4',dir=temp_dir)
     # 保存上传的视频到临时文件
     file.save(input_temp_file.name)
     # 处理视频
     cap = cv2.VideoCapture(input_temp_file.name)
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    # fps = cap.get(cv2.CAP_PROP_FPS)
+    fps = 30
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fourcc = cv2.VideoWriter_fourcc('a', 'v', 'c', '1')
-    out = cv2.VideoWriter(output_temp_file.name, fourcc, fps, (850, 500), isColor=True)
+    out = cv2.VideoWriter(output_temp_file.name, fourcc, fps, (width, height), isColor=True)
     while True:
         ret, frame = cap.read()
         if not ret:
             break
         processed_frame = frame_process(frame)
         out.write(processed_frame)
-
     cap.release()
     out.release()
-
-    # 返回处理后的视频文件
-    # output_temp_file.close()  # 必须先关闭，否则在Windows上可能出错
+    input_temp_file.close()
+    output_temp_file.close()
+    if output_temp_file.closed:
+        print(1)
     return send_file(output_temp_file.name, mimetype='video/mp4', as_attachment=True)
+# @app.after_request
+# def cleanup(response):
+#     temp_folder = 'temp'  # 临时文件夹的路径
+#     # 删除临时文件夹中的文件
+#     for file_name in os.listdir(temp_folder):
+#         file_path = os.path.join(temp_folder, file_name)
+#         os.remove(file_path)
+#     # 删除临时文件夹
+#     return response
 
 @app.route('/detectCam', methods=['POST'])
 def detect_cam():
@@ -140,7 +152,7 @@ def detect_cam():
     header, encoded = image_data.split(",", 1)
     image_decoded = base64.b64decode(encoded)
     image = cv2.imdecode(np.frombuffer(image_decoded, np.uint8), cv2.IMREAD_COLOR)
-    image=frame_process(image)
+    image = frame_process(image)
 
     # 将处理后的图像转换回Base64以发送回客户端
     _, buffer = cv2.imencode('.jpg', image)
@@ -148,6 +160,7 @@ def detect_cam():
 
     # 返回处理后的图像数据
     return jsonify({"processedImage": f"data:image/jpeg;base64,{img_base64}"})
+
 
 @app.route('/detectCam1', methods=['POST'])
 def detect_cam1():
@@ -176,13 +189,37 @@ def detect_cam1():
     # 返回处理后的图像数据
     return card
 
+
 @socketio.on('connect')
 def handle_connect():
     print('Client connected')
 
+
 @socketio.on('disconnect')
 def handle_disconnect():
     print('Client disconnected')
+
+
+@socketio.on('image1')
+def handle_image(message):
+    if isinstance(message, bytes):  # 检查消息是否为二进制
+        # 将二进制数据转换为图像
+        arr = np.frombuffer(message, np.uint8)
+        image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        pre_img = model.preprocess(image)  # 对图像进行预处理
+        pred, superimposed_img = model.predict(pre_img)  # 使用模型进行预测
+        det = pred[0]  # 获取预测结果
+        card = []
+        # 如果有检测信息则进入
+        if det is not None and len(det):
+            det_info = model.postprocess(pred)  # 对预测结果进行后处理
+            for info in det_info:  # 遍历检测信息
+                name, bbox, conf, cls_id = info['class_name'], info['bbox'], info['score'], info[
+                    'class_id']  # 获取类别名称、边界框、置信度和类别ID
+                if conf > 0.8:
+                    card.append(name)
+        socketio.emit('processed', card)
+
 
 @socketio.on('image')
 def handle_image(message):
@@ -194,17 +231,6 @@ def handle_image(message):
         _, buffer = cv2.imencode('.jpg', image)
         socketio.emit('processed', buffer.tobytes())
 
-# @socketio.on('image')
-# def handle_image(message):
-#     if isinstance(message, bytes):
-#         Thread(target=process_image, args=(message,)).start()
-#
-# def process_image(message):
-#     arr = np.frombuffer(message, np.uint8)
-#     image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-#     image = frame_process(image)
-#     _, buffer = cv2.imencode('.jpg', image)
-#     socketio.emit('processed', buffer.tobytes())
 
 if __name__ == '__main__':
     app.run(debug=True)
